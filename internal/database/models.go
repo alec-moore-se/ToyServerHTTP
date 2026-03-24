@@ -16,12 +16,13 @@ type Chirp struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Body      string
-	UserID    uuid.NullUUID
+	UserID    uuid.UUID
 }
 
 type User struct {
-	ID        uuid.UUID
-	CreatedAt sql.NullTime
-	UpdatedAt sql.NullTime
-	Email     string
+	ID             uuid.UUID
+	CreatedAt      sql.NullTime
+	UpdatedAt      sql.NullTime
+	Email          string
+	HashedPassword string
 }

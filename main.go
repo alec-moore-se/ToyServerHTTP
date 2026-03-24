@@ -7,12 +7,11 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/alec-moore-se/ToyServerHTTP/internal/auth"
 	"github.com/alec-moore-se/ToyServerHTTP/internal/database"
-	"github.com/alec-moore-se/ToyServerHTTP/internal/database/models"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -22,6 +21,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 type UserType struct {
@@ -29,6 +29,7 @@ type UserType struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 func main() {
@@ -38,7 +39,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		_ = fmt.Errorf("Database failed to open: %w", err)
+		_ = fmt.Errorf("database failed to open: %w", err)
 		return
 	}
 
@@ -48,6 +49,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		db:             dbQueries,
 		platform:       os.Getenv("PLATFORM"),
+		jwtSecret:      os.Getenv("JWT_SECRET"),
 	}
 
 	mux := http.NewServeMux()
@@ -57,6 +59,9 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
+	mux.HandleFunc("POST /api/login", apiCfg.Login)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -96,7 +101,8 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type params struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -119,88 +125,83 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Fprintf(w, `{"id": "%s", "created_at": "%s", "updated_at": "%s", "email": "%s"}`, user.ID, user.CreatedAt, user.UpdatedAt, user.Email)
+	user.HashedPassword, err = auth.HashPassword(p.Password)
+	if err != nil {
+		fmt.Fprintf(w, "Error hashing password")
+	}
+	err = cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             user.ID,
+		HashedPassword: user.HashedPassword,
+	},
+	)
+	if err != nil {
+		fmt.Fprintf(w, "Error hashing password")
+		fmt.Println(err)
+		user.HashedPassword = ""
+	}
+
+	fmt.Fprintf(w, `{"id": "%s", "created_at": "%s", "updated_at": "%s", "email": "%s"}`,
+		user.ID, user.CreatedAt.Time, user.UpdatedAt.Time, user.Email)
 }
 
-func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
-	w.Header().Add("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusCreated)
+func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
+	type login struct {
+		Email     string        `json:"email"`
+		Password  string        `json:"password"`
+		ExpiresIn time.Duration `json:"expires_in_seconds"`
+	}
 
-	if r.Header.Get("Content-Type") != "application/json" {
-		fmt.Fprintf(w, "Content-Type is not application/json")
+	decoder := json.NewDecoder(r.Body)
+	var p login
+	err := decoder.Decode(&p)
+	if err != nil {
+		fmt.Fprintf(w, "Error creating json")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	type jsonBody struct {
-		Body    string        `json:"body"`
-		User_id uuid.NullUUID `json:"user_id"`
-	}
-	type returners struct {
-		Valid       bool   `json:"valid"`
-		Error       string `json:"error"`
-		CleanedBody string `json:"cleaned_body"`
+	if p.ExpiresIn == 0 || p.ExpiresIn > time.Hour {
+		p.ExpiresIn = time.Hour
 	}
 
-	type userChirp struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body      string    `json:"body"`
-		UserID    uuid.UUID `json:"user_id"`
-	}
+	w.Header().Add("Content-Type", "application/json; charset=utf-8")
 
-	decoder := json.NewDecoder(r.Body)
-	params := jsonBody{}
-	returner := returners{}
-	userChirps := userChirp{}
-	err := decoder.Decode(&params)
+	user, err := cfg.db.GetUserwEmail(r.Context(), p.Email)
 	if err != nil {
-		returner.Error = "Something went wrong"
-		w.WriteHeader(500)
+		fmt.Fprintf(w, "Error getting user")
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	if len(params.Body) > 140 {
-		returner.Error = "Chirp is too long"
-		w.WriteHeader(400)
-		data, err := json.Marshal(returner)
-		if err != nil {
-			w.WriteHeader(500)
-			return
-		}
-		w.Write(data)
-		return
-	}
-	clean_body := strings.ToLower(params.Body)
-	listOfWordsClean := strings.Split(clean_body, " ")
-	listOfWordsDirty := strings.Split(params.Body, " ")
-	for i := range listOfWordsClean {
-		if listOfWordsClean[i] == "kerfuffle" {
-			listOfWordsClean[i] = "****"
-		}
-		if listOfWordsClean[i] == "sharbert" {
-			listOfWordsClean[i] = "****"
-		}
-		if listOfWordsClean[i] == "fornax" {
-			listOfWordsClean[i] = "****"
-		}
-		if listOfWordsClean[i] != "****" {
-			listOfWordsClean[i] = listOfWordsDirty[i]
-		}
-	}
-	returner.CleanedBody = strings.Join(listOfWordsClean, " ")
-
-	w.Header().Set("Content-Type", "application/json")
-	returner.Valid = true
-
-	userChirps = cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{returner.CleanedBody, params.User_id})
-
-	data, err := json.Marshal(returner)
+	match, err := auth.CheckPasswordHash(p.Password, user.HashedPassword)
 	if err != nil {
-		returner.Error = "Something went wrong"
-		w.WriteHeader(500)
+		fmt.Fprintf(w, "Error checking password")
+		fmt.Printf("User Pass: %s\n", user.HashedPassword)
+		fmt.Printf("tried Pass: %s\n", p.Password)
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.Write(data)
+	if !match {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, p.ExpiresIn)
+	if err != nil {
+		fmt.Fprintf(w, "Error making JWT")
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(UserType{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt.Time,
+		UpdatedAt: user.UpdatedAt.Time,
+		Email:     user.Email,
+		Token:     token,
+	})
 }

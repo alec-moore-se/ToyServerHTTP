@@ -21,7 +21,7 @@ RETURNING id, created_at, updated_at, body, user_id
 
 type CreateChirpParams struct {
 	Body   string
-	UserID uuid.NullUUID
+	UserID uuid.UUID
 }
 
 func (q *Queries) CreateChirp(ctx context.Context, arg CreateChirpParams) (Chirp, error) {
@@ -37,16 +37,12 @@ func (q *Queries) CreateChirp(ctx context.Context, arg CreateChirpParams) (Chirp
 	return i, err
 }
 
-func (q *Queries) test(ctx context.Context) {
-	app, err := q.db.CreateChirp(ctx, &args{returner.CleanedBody, params.User_id})
-}
-
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, created_at, updated_at, email)
 VALUES (
     gen_random_uuid(), NOW(), NOW(), $1
 )
-RETURNING id, created_at, updated_at, email
+RETURNING id, created_at, updated_at, email, hashed_password
 `
 
 func (q *Queries) CreateUser(ctx context.Context, email string) (User, error) {
@@ -57,15 +53,97 @@ func (q *Queries) CreateUser(ctx context.Context, email string) (User, error) {
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Email,
+		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const getChirp = `-- name: GetChirp :one
+SELECT id, created_at, updated_at, body, user_id FROM chirps WHERE id = $1
+`
+
+func (q *Queries) GetChirp(ctx context.Context, id uuid.UUID) (Chirp, error) {
+	row := q.db.QueryRowContext(ctx, getChirp, id)
+	var i Chirp
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Body,
+		&i.UserID,
+	)
+	return i, err
+}
+
+const getChirps = `-- name: GetChirps :many
+SELECT id, created_at, updated_at, body, user_id FROM chirps ORDER BY created_at ASC
+`
+
+func (q *Queries) GetChirps(ctx context.Context) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getChirps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chirp
+	for rows.Next() {
+		var i Chirp
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Body,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getUserwEmail = `-- name: GetUserwEmail :one
+SELECT id, created_at, updated_at, email, hashed_password FROM users WHERE email = $1
+`
+
+func (q *Queries) GetUserwEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserwEmail, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+		&i.HashedPassword,
 	)
 	return i, err
 }
 
 const resetUsers = `-- name: ResetUsers :exec
-TRUNCATE TABLE users
+TRUNCATE TABLE users CASCADE
 `
 
 func (q *Queries) ResetUsers(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, resetUsers)
+	return err
+}
+
+const updateUser = `-- name: UpdateUser :exec
+UPDATE users SET hashed_password = $2 WHERE id = $1
+`
+
+type UpdateUserParams struct {
+	ID             uuid.UUID
+	HashedPassword string
+}
+
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) error {
+	_, err := q.db.ExecContext(ctx, updateUser, arg.ID, arg.HashedPassword)
 	return err
 }
