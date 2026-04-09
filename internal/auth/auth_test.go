@@ -2,42 +2,133 @@ package auth
 
 import (
 	"fmt"
+	"github.com/google/uuid"
+	"net/http"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
-func TestHashPassword(t *testing.T) {
-	var password string
-	var err error
-	password, err = HashPassword("password")
-	if err != nil {
-		t.Errorf("Error hashing password: %v", err)
+func TestCheckPasswordHash(t *testing.T) {
+	// First, we need to create some hashed passwords for testing
+	password1 := "correctPassword123!"
+	password2 := "anotherPassword456!"
+	hash1, _ := HashPassword(password1)
+	hash2, _ := HashPassword(password2)
+
+	tests := []struct {
+		name          string
+		password      string
+		hash          string
+		wantErr       bool
+		matchPassword bool
+	}{
+		{
+			name:          "Correct password",
+			password:      password1,
+			hash:          hash1,
+			wantErr:       false,
+			matchPassword: true,
+		},
+		{
+			name:          "Incorrect password",
+			password:      "wrongPassword",
+			hash:          hash1,
+			wantErr:       false,
+			matchPassword: false,
+		},
+		{
+			name:          "Password doesn't match different hash",
+			password:      password1,
+			hash:          hash2,
+			wantErr:       false,
+			matchPassword: false,
+		},
+		{
+			name:          "Empty password",
+			password:      "",
+			hash:          hash1,
+			wantErr:       false,
+			matchPassword: false,
+		},
+		{
+			name:          "Invalid hash",
+			password:      password1,
+			hash:          "invalidhash",
+			wantErr:       true,
+			matchPassword: false,
+		},
 	}
-	fmt.Println(password)
-	match, err := CheckPasswordHash("password", password)
-	if err != nil {
-		t.Errorf("Error checking password: %v", err)
-	}
-	if !match {
-		t.Errorf("Passwords do not match")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			match, err := CheckPasswordHash(tt.password, tt.hash)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CheckPasswordHash() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && match != tt.matchPassword {
+				t.Errorf("CheckPasswordHash() expects %v, got %v", tt.matchPassword, match)
+			}
+		})
 	}
 }
 
-func TestMakeJWT(t *testing.T) {
+func TestValidateJWT(t *testing.T) {
 	userID := uuid.New()
-	token, err := MakeJWT(userID, "secretKey", time.Hour)
+	validToken, _ := MakeJWT(userID, "secret", time.Hour)
+
+	tests := []struct {
+		name        string
+		tokenString string
+		tokenSecret string
+		wantUserID  uuid.UUID
+		wantErr     bool
+	}{
+		{
+			name:        "Valid token",
+			tokenString: validToken,
+			tokenSecret: "secret",
+			wantUserID:  userID,
+			wantErr:     false,
+		},
+		{
+			name:        "Invalid token",
+			tokenString: "invalid.token.string",
+			tokenSecret: "secret",
+			wantUserID:  uuid.Nil,
+			wantErr:     true,
+		},
+		{
+			name:        "Wrong secret",
+			tokenString: validToken,
+			tokenSecret: "wrong_secret",
+			wantUserID:  uuid.Nil,
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotUserID, err := ValidateJWT(tt.tokenString, tt.tokenSecret)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateJWT() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotUserID != tt.wantUserID {
+				t.Errorf("ValidateJWT() gotUserID = %v, want %v", gotUserID, tt.wantUserID)
+			}
+		})
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer mothertrucker")
+	token, err := GetBearerToken(headers)
 	if err != nil {
-		t.Errorf("Error making JWT: %v", err)
+		t.Errorf("Error getting bearer token: %v", err)
 	}
 	fmt.Println(token)
-	userID2, err := ValidateJWT(token, "secretKey")
-	if err != nil {
-		t.Errorf("Error validating JWT: %v", err)
+	if token != "mothertrucker" {
+		t.Errorf("Token does not match")
 	}
-	if userID != userID2 {
-		t.Errorf("User IDs do not match")
-	}
-	fmt.Println(userID2)
 }

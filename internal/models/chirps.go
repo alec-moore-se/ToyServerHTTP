@@ -1,9 +1,10 @@
-package main
+package models
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,19 +21,17 @@ type userChirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 
-func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *ApiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusCreated)
 
 	if r.Header.Get("Content-Type") != "application/json" {
-		fmt.Fprintf(w, "Content-Type is not application/json")
 		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "Content-Type is not application/json")
 		return
 	}
 
 	type jsonBody struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type returners struct {
@@ -46,33 +45,39 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	returner := returners{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		returner.Error = "Something went wrong"
 		w.WriteHeader(500)
+		returner.Error = "Something went wrong"
+		data, _ := json.Marshal(returner)
+		w.Write(data)
 		return
 	}
 
-	//--------------
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		returner.Error = "Error getting token"
+		data, _ := json.Marshal(returner)
+		w.Write(data)
+		return
 	}
+
 	userUUID, err := auth.ValidateJWT(token, cfg.jwtSecret)
 	if err != nil {
-		returner.Error = "Error validating token"
+		w.WriteHeader(http.StatusUnauthorized)
+		returner.Error = "Error getting user ID"
+		data, _ := json.Marshal(returner)
+		w.Write(data)
+		return
 	}
-	if params.UserID != userUUID {
-		returner.Error = "User ID does not match"
-	}
-	//--------------
 
 	if len(params.Body) > 140 {
 		returner.Error = "Chirp is too long"
-		w.WriteHeader(400)
 		data, err := json.Marshal(returner)
 		if err != nil {
 			w.WriteHeader(500)
 			return
 		}
+		w.WriteHeader(400)
 		w.Write(data)
 		return
 	}
@@ -100,10 +105,12 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 
 	userChirps, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   returner.CleanedBody,
-		UserID: params.UserID,
+		UserID: userUUID,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error creating chirp")
+		fmt.Println(err)
 		return
 	}
 
@@ -115,43 +122,67 @@ func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 		UserID:    userChirps.UserID,
 	}
 
+	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+func (cfg *ApiConfig) GetChirps(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
+
+	author_id := r.URL.Query().Get("author_id")
+	userID, err := uuid.Parse(author_id)
+	if err != nil {
+		userID = uuid.Nil
+	}
+
+	sortQuery := r.URL.Query().Get("sort")
+	if sortQuery != "desc" {
+		sortQuery = "asc"
+	}
 
 	chirps, err := cfg.db.GetChirps(r.Context())
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "Error getting chirps")
 		fmt.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	var resp []userChirp
 	for _, chirp := range chirps {
-		resp = append(resp, userChirp{
-			ID:        chirp.ID,
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body:      chirp.Body,
-			UserID:    chirp.UserID,
+		if userID == uuid.Nil || userID == chirp.UserID {
+			resp = append(resp, userChirp{
+				ID:        chirp.ID,
+				CreatedAt: chirp.CreatedAt,
+				UpdatedAt: chirp.UpdatedAt,
+				Body:      chirp.Body,
+				UserID:    chirp.UserID,
+			})
+		}
+	}
+
+	if sortQuery == "desc" {
+		sort.Slice(resp, func(i, j int) bool {
+			return resp[i].CreatedAt.After(resp[j].CreatedAt)
+		})
+	} else {
+		sort.Slice(resp, func(i, j int) bool {
+			return resp[i].CreatedAt.Before(resp[j].CreatedAt)
 		})
 	}
 
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *ApiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json; charset=utf-8")
 
 	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "Error parsing chirpID")
 		fmt.Println(err)
-		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
@@ -173,4 +204,55 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (cfg *ApiConfig) DeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Error getting token 1")
+		fmt.Println(err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "Error getting user ID")
+		fmt.Println(err)
+		return
+	}
+
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "Error parsing chirpID")
+		fmt.Println(err)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, "Error getting chirp")
+		fmt.Println(err)
+		return
+	}
+
+	if chirp.UserID != userID {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, "Error getting chirp")
+		fmt.Println(err)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error deleting chirp")
+		fmt.Println(err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

@@ -19,10 +19,20 @@ type Chirp struct {
 	UserID    uuid.UUID
 }
 
+type RefreshToken struct {
+	Token     string
+	CreatedAt sql.NullTime
+	UpdatedAt sql.NullTime
+	UserID    uuid.UUID
+	ExpiresAt sql.NullTime
+	RevokedAt sql.NullTime
+}
+
 type User struct {
 	ID             uuid.UUID
 	CreatedAt      sql.NullTime
 	UpdatedAt      sql.NullTime
 	Email          string
 	HashedPassword string
+	IsChirpyRed    sql.NullBool
 }
